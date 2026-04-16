@@ -5,9 +5,10 @@ import { useLocalStorage } from '@/lib/use-local-storage';
 import { 
   FolderGit2, Settings, GitBranch, ArrowRight, 
   Terminal, Sparkles, Send, CheckCircle2, AlertCircle,
-  Loader2, ExternalLink, X, FolderSearch
+  Loader2, ExternalLink, X, FolderSearch, Copy
 } from 'lucide-react';
 import GitGraphViewer from '@/components/GitGraphViewer';
+import MigrationSidebar from '@/components/MigrationSidebar';
 
 export default function Home() {
   // Config State
@@ -38,17 +39,28 @@ export default function Home() {
   const [targetHashes, setTargetHashes] = useState<Set<string>>(new Set());
 
   const [searchQuery, setSearchQuery] = useState('');
-  const [showAllBranches, setShowAllBranches] = useState(false);
   
   // Operation State
-  const [operateLog, setOperateLog] = useState<{stdout: string, stderr: string, exitCode: number} | null>(null);
+  const [operateLog, setOperateLog] = useState<{stdout: string, stderr: string, exitCode: number | null} | null>(null);
+  const [resumingRecordId, setResumingRecordId] = useState<string | null>(null);
 
   // PR State
   const [prContent, setPrContent] = useState('');
   const [diffContent, setDiffContent] = useState('');
   const [prTitle, setPrTitle] = useState('Migration Update');
-  const [reviewers, setReviewers] = useState('');
+  const [reviewers, setReviewers] = useLocalStorage('commitManager_reviewers', '');
   const [prUrl, setPrUrl] = useState('');
+  
+  // History State
+  const [migrationHistory, setMigrationHistory] = useLocalStorage<any[]>('commitManager_migrationHistory', []);
+  const terminalRef = useRef<HTMLDivElement>(null);
+
+  // Auto-scroll terminal
+  useEffect(() => {
+    if (terminalRef.current) {
+      terminalRef.current.scrollTop = terminalRef.current.scrollHeight;
+    }
+  }, [operateLog?.stdout, operateLog?.stderr]);
 
   // --- Handlers --- //
 
@@ -105,13 +117,13 @@ export default function Home() {
   };
 
   // Always keep a ref to latest params to avoid stale closures in loadCommits
-  const latestParams = useRef({ projectPath, baseBranch, targetBranch, searchQuery, showAllBranches });
+  const latestParams = useRef({ projectPath, baseBranch, targetBranch, searchQuery });
   useEffect(() => {
-    latestParams.current = { projectPath, baseBranch, targetBranch, searchQuery, showAllBranches };
+    latestParams.current = { projectPath, baseBranch, targetBranch, searchQuery };
   });
 
   const loadCommits = useCallback(async () => {
-    const { projectPath, baseBranch, targetBranch, searchQuery, showAllBranches } = latestParams.current;
+    const { projectPath, baseBranch, targetBranch, searchQuery } = latestParams.current;
     if (!projectPath || !baseBranch) return;
     setIsRunning(true);
     setError('');
@@ -124,8 +136,7 @@ export default function Home() {
           projectPath, 
           branch: baseBranch,
           compareBranch: targetBranch,
-          search: searchQuery || undefined,
-          showAll: showAllBranches
+          search: searchQuery || undefined
         }),
       });
       const data = await res.json();
@@ -142,20 +153,66 @@ export default function Home() {
 
   useEffect(() => {
     if (step === 2 && baseBranch) {
-      loadCommits(false);
+      loadCommits();
     }
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [step, baseBranch, searchQuery, showAllBranches]);
+  }, [step, baseBranch, targetBranch, searchQuery, loadCommits]);
 
   const branchAndReset = async () => {
     if (!selectedCommit) return setError("Please select a target commit");
+    setResumingRecordId(null);
+    setOperateLog(null);
     setStep(3);
+  };
+
+  const handleSelectRecord = (record: any) => {
+    setStep(3);
+    setResumingRecordId(record.id);
+    setBaseBranch(record.sourceBranch);
+    setTargetBranch(record.targetBranch);
+    setCiCommand(record.command || ciCommand);
+    setNewBranchName(record.branchName);
+    setSelectedCommit(record.commitHash);
+    setOperateLog({ 
+      stdout: record.log || '', 
+      stderr: '', 
+      exitCode: record.status === 'success' ? 0 : record.status === 'failed' ? 1 : null 
+    });
+    setPrContent('');
+    setDiffContent('');
+    setPrUrl('');
+    setError('');
   };
 
   const runOperation = async () => {
     setIsRunning(true);
     setError('');
-    setOperateLog(null);
+    setOperateLog({ stdout: '', stderr: '', exitCode: null });
+    
+    // Determine if we are resuming or starting fresh
+    const historyId = resumingRecordId || Date.now().toString();
+    const isResuming = !!resumingRecordId;
+    
+    if (isResuming) {
+      setMigrationHistory(prev => prev.map(r => r.id === historyId ? { 
+        ...r, status: 'running', log: '', command: ciCommand 
+      } : r));
+    } else {
+      const selectedCommitObj = commits.find(c => c.hash === selectedCommit);
+      const newRecord = {
+         id: historyId,
+         branchName: 'Preparing...',
+         sourceBranch: baseBranch,
+         targetBranch: targetBranch,
+         commitHash: selectedCommit,
+         commitMessage: selectedCommitObj?.message || '',
+         status: 'running' as const,
+         timestamp: new Date().toLocaleTimeString(),
+         command: ciCommand,
+         log: ''
+      };
+      setMigrationHistory(prev => [newRecord, ...prev]);
+    }
+
     try {
       const res = await fetch('/api/git/operate', {
         method: 'POST',
@@ -164,16 +221,53 @@ export default function Home() {
           projectPath, 
           baseBranch, 
           targetCommitHash: selectedCommit,
-          commandString: ciCommand
+          commandString: ciCommand,
+          existingBranchName: isResuming ? newBranchName : undefined
         }),
       });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error);
-      
-      setNewBranchName(data.newBranchName);
-      setOperateLog(data.operateResult);
+
+      if (!res.ok) throw new Error('Failed to start operation');
+      if (!res.body) throw new Error('No response body');
+
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split('\n');
+        buffer = lines.pop() || '';
+
+        for (const line of lines) {
+          if (!line.trim()) continue;
+          const chunk = JSON.parse(line);
+
+          if (chunk.type === 'info') {
+            setNewBranchName(chunk.newBranchName);
+            setMigrationHistory(prev => prev.map(r => r.id === historyId ? { ...r, branchName: chunk.newBranchName } : r));
+          } else if (chunk.type === 'stdout') {
+            setOperateLog(prev => prev ? { ...prev, stdout: prev.stdout + chunk.data } : null);
+            setMigrationHistory(prev => prev.map(r => r.id === historyId ? { ...r, log: (r.log || '') + chunk.data } : r));
+          } else if (chunk.type === 'stderr') {
+            setOperateLog(prev => prev ? { ...prev, stderr: prev.stderr + chunk.data } : null);
+            setMigrationHistory(prev => prev.map(r => r.id === historyId ? { ...r, log: (r.log || '') + chunk.data } : r));
+          } else if (chunk.type === 'exit') {
+            setOperateLog(prev => prev ? { ...prev, exitCode: chunk.code } : null);
+            setMigrationHistory(prev => prev.map(r => r.id === historyId ? { 
+              ...r, 
+              status: chunk.code === 0 ? 'success' : 'failed' 
+            } : r));
+          } else if (chunk.type === 'error') {
+             throw new Error(chunk.message);
+          }
+        }
+      }
     } catch (err: any) {
       setError(err.message);
+      setMigrationHistory(prev => prev.map(r => r.id === historyId ? { ...r, status: 'failed' } : r));
     } finally {
       setIsRunning(false);
     }
@@ -266,7 +360,7 @@ export default function Home() {
     if (step === 2 && baseBranch && targetBranch) {
       loadCommits();
     }
-  }, [step, baseBranch, targetBranch, searchQuery, showAllBranches]);
+  }, [step, baseBranch, targetBranch, searchQuery, loadCommits]);
 
   // --- Render --- //
   if (!mounted) {
@@ -278,77 +372,85 @@ export default function Home() {
   }
 
   return (
-    <div className="min-h-screen bg-slate-50 text-slate-900 font-sans selection:bg-blue-100 italic-none">
+    <div className="flex h-screen bg-slate-50 text-slate-900 font-sans selection:bg-blue-100 overflow-hidden">
       
-      {/* Top Navbar */}
-      <nav className="w-full bg-white border-b border-slate-200 px-6 py-4 flex items-center justify-between shadow-sm sticky top-0 z-40">
-        <div className="flex items-center gap-3">
-          <div className="bg-blue-100 text-blue-600 p-2 rounded-lg">
-            <GitBranch size={20} />
-          </div>
-          <h1 className="text-xl font-bold text-slate-800 tracking-tight">Workspace Migration</h1>
-        </div>
-        
-        <button onClick={() => setShowSettings(true)}
-          className="flex items-center gap-2 px-4 py-2 text-sm font-medium text-slate-600 hover:text-slate-900 hover:bg-slate-100 rounded-lg transition-colors">
-          <Settings size={18} /> Settings
-        </button>
-      </nav>
+      {/* Sidebar */}
+      <aside className="w-80 shrink-0 hidden lg:block">
+        <MigrationSidebar 
+          history={migrationHistory} 
+          onClearHistory={() => setMigrationHistory([])} 
+          onSelectRecord={handleSelectRecord}
+        />
+      </aside>
 
-      {/* Settings Modal */}
-      {showSettings && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/40 backdrop-blur-sm animate-fade-in">
-          <div className="bg-white rounded-2xl w-full max-w-lg shadow-2xl overflow-hidden shadow-[0_20px_50px_rgba(0,0,0,0.1)]">
-            <div className="px-6 py-4 border-b border-slate-100 flex justify-between items-center bg-slate-50">
-              <h3 className="font-bold text-lg flex items-center gap-2"><Settings size={18}/> App Settings</h3>
-              <button onClick={() => setShowSettings(false)} className="text-slate-400 hover:text-slate-600 p-1"><X size={20}/></button>
+      {/* Main Content Area */}
+      <div className="flex-1 flex flex-col min-w-0 overflow-hidden">
+        {/* Top Navbar */}
+        <nav className="w-full bg-white border-b border-slate-200 px-6 py-4 flex items-center justify-between shadow-sm shrink-0 z-40">
+          <div className="flex items-center gap-3">
+            <div className="bg-blue-100 text-blue-600 p-2 rounded-lg">
+              <GitBranch size={20} />
             </div>
-            
-            <div className="p-6 space-y-5">
-              <div>
-                <label className="block text-sm font-semibold text-slate-700 mb-1">AI Provider</label>
-                <select value={aiProvider} onChange={e => setAiProvider(e.target.value)} className="input-clean font-medium">
-                  <option value="gemini">Google Gemini</option>
-                  <option value="openai">OpenAI</option>
-                  <option value="deepseek">DeepSeek</option>
-                  <option value="openrouter">OpenRouter</option>
-                  <option value="lmstudio">LM Studio (Local)</option>
-                </select>
+            <h1 className="text-xl font-bold text-slate-800 tracking-tight">Workspace Migration</h1>
+          </div>
+          
+          <button onClick={() => setShowSettings(true)}
+            className="flex items-center gap-2 px-4 py-2 text-sm font-medium text-slate-600 hover:text-slate-900 hover:bg-slate-100 rounded-lg transition-colors">
+            <Settings size={18} /> Settings
+          </button>
+        </nav>
+
+        {/* Settings Modal - fullscreen overlay, must be outside <main> */}
+        {showSettings && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/40 backdrop-blur-sm animate-fade-in">
+            <div className="bg-white rounded-2xl w-full max-w-lg shadow-2xl overflow-hidden">
+              <div className="px-6 py-4 border-b border-slate-100 flex justify-between items-center bg-slate-50">
+                <h3 className="font-bold text-lg flex items-center gap-2"><Settings size={18}/> App Settings</h3>
+                <button onClick={() => setShowSettings(false)} className="text-slate-400 hover:text-slate-600 p-1"><X size={20}/></button>
               </div>
-              <div>
-                <label className="block text-sm font-semibold text-slate-700 mb-1">AI Provider API Key</label>
-                <input type="password" value={apiKey} onChange={e => setApiKey(e.target.value)} className="input-clean font-mono text-sm" placeholder="sk-..." />
-              </div>
-              <div className="pt-2">
-                <label className="block text-sm font-semibold text-slate-700 mb-1">GitHub Personal Access Token</label>
-                <input type="password" value={githubToken} onChange={e => setGithubToken(e.target.value)} className="input-clean font-mono text-sm" placeholder="ghp_..." />
-                <div className="text-xs text-slate-500 mt-2 space-y-1 bg-slate-100 p-3 rounded-lg border border-slate-200">
-                  <p className="font-semibold text-slate-700 mb-1">How to generate a token:</p>
-                  <ol className="list-decimal list-inside space-y-0.5 ml-1">
-                    <li>Go to <a href="https://github.com/settings/tokens/new" target="_blank" rel="noreferrer" className="text-blue-600 hover:underline">GitHub Developer Settings</a></li>
-                    <li>Add a Note (e.g. "Commit Migration Tool")</li>
-                    <li>Select the <strong>`repo`</strong> scope (Full control of private repositories)</li>
-                    <li>Click <strong>Generate token</strong> at the bottom</li>
-                  </ol>
-                  <p className="text-orange-600 mt-1.5 flex items-center gap-1"><AlertCircle size={12}/> Make sure to copy the token! You won't be able to see it again.</p>
+              <div className="p-6 space-y-5">
+                <div>
+                  <label className="block text-sm font-semibold text-slate-700 mb-1">AI Provider</label>
+                  <select value={aiProvider} onChange={e => setAiProvider(e.target.value)} className="input-clean font-medium">
+                    <option value="gemini">Google Gemini</option>
+                    <option value="openai">OpenAI</option>
+                    <option value="deepseek">DeepSeek</option>
+                    <option value="openrouter">OpenRouter</option>
+                    <option value="lmstudio">LM Studio (Local)</option>
+                  </select>
+                </div>
+                <div>
+                  <label className="block text-sm font-semibold text-slate-700 mb-1">AI Provider API Key</label>
+                  <input type="password" value={apiKey} onChange={e => setApiKey(e.target.value)} className="input-clean font-mono text-sm" placeholder="sk-..." />
+                </div>
+                <div className="pt-2">
+                  <label className="block text-sm font-semibold text-slate-700 mb-1">GitHub Personal Access Token</label>
+                  <input type="password" value={githubToken} onChange={e => setGithubToken(e.target.value)} className="input-clean font-mono text-sm" placeholder="ghp_..." />
+                  <div className="text-xs text-slate-500 mt-2 space-y-1 bg-slate-100 p-3 rounded-lg border border-slate-200">
+                    <p className="font-semibold text-slate-700 mb-1">How to generate a token:</p>
+                    <ol className="list-decimal list-inside space-y-0.5 ml-1">
+                      <li>Go to <a href="https://github.com/settings/tokens/new" target="_blank" rel="noreferrer" className="text-blue-600 hover:underline">GitHub Developer Settings</a></li>
+                      <li>Add a Note (e.g. "Commit Migration Tool")</li>
+                      <li>Select the <strong>`repo`</strong> scope</li>
+                      <li>Click <strong>Generate token</strong> at the bottom</li>
+                    </ol>
+                    <p className="text-orange-600 mt-1.5 flex items-center gap-1"><AlertCircle size={12}/> Copy the token — you won't see it again.</p>
+                  </div>
                 </div>
               </div>
-            </div>
-            <div className="px-6 py-4 border-t border-slate-100 bg-slate-50 flex justify-end">
-              <button onClick={() => setShowSettings(false)} className="bg-blue-600 hover:bg-blue-700 text-white px-6 py-2 rounded-lg font-medium transition-colors">
-                Save & Close
-              </button>
+              <div className="px-6 py-4 border-t border-slate-100 bg-slate-50 flex justify-end">
+                <button onClick={() => setShowSettings(false)} className="bg-blue-600 hover:bg-blue-700 text-white px-6 py-2 rounded-lg font-medium transition-colors">Save & Close</button>
+              </div>
             </div>
           </div>
-        </div>
-      )}
+        )}
 
-      {/* Main Content */}
-      <div className="mt-10 px-6 max-w-4xl mx-auto space-y-8 pb-10">
+        <main className="flex-1 overflow-y-auto p-4 sm:p-6 lg:p-8">
+          <div className="max-w-4xl mx-auto space-y-8 pb-20">
 
         {/* Global Error Banner */}
         {error && (
-          <div className="bg-red-50 border-l-4 border-red-500 text-red-700 p-4 rounded-r-lg flex items-start gap-3 shadow-sm animate-fade-in mb-6">
+          <div className="bg-red-50 border-l-4 border-red-500 text-red-700 p-4 rounded-r-lg flex items-start gap-3 shadow-sm animate-fade-in">
             <AlertCircle className="mt-0.5 shrink-0" size={18} />
             <span className="font-medium">{error}</span>
           </div>
@@ -357,6 +459,7 @@ export default function Home() {
         {/* STEP 1: Select Project */}
         <section className={`clean-panel p-6 sm:p-8 transition-opacity duration-300 ${step !== 1 && 'opacity-50'}`}>
           <div className="flex items-center gap-3 mb-6">
+
             <div className="bg-indigo-100 text-indigo-600 p-2 rounded-lg"><FolderSearch size={22}/></div>
             <h2 className="text-xl font-bold">1. Select Project</h2>
           </div>
@@ -374,79 +477,70 @@ export default function Home() {
             </button>
           )}
         </section>
-      </div>
 
-      {/* STEP 2 — Full Width Git Graph Panel */}
-      {step >= 2 && (
-        <>
-          <div className="px-6 max-w-4xl mx-auto">
-          <div className={`clean-panel p-6 sm:p-8 transition-opacity duration-300 ${step !== 2 && 'opacity-50'}`}>
-              {/* Branch selectors row */}
-              <div className="flex items-center gap-3 mb-5">
-                <div className="bg-emerald-100 text-emerald-600 p-2 rounded-lg"><GitBranch size={20}/></div>
-                <h2 className="text-xl font-bold">2. Map Commits</h2>
-                {isRunning && commits.length > 0 && <Loader2 size={16} className="animate-spin text-slate-400 ml-auto" />}
-              </div>
-
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-4 relative">
-                <div className="bg-slate-50 p-4 rounded-xl border border-slate-200">
-                  <label className="block text-[11px] font-bold text-slate-400 uppercase tracking-wider mb-1.5">Base Branch (Source)</label>
-                  <select value={baseBranch} onChange={e => setBaseBranch(e.target.value)} className="input-clean font-medium shadow-sm bg-white text-sm">
-                    {branches.map(b => <option key={b} value={b}>{b}</option>)}
-                  </select>
+        {/* STEP 2 — Full Width Git Graph Panel */}
+        {step >= 2 && (
+          <>
+            <div className={`clean-panel transition-opacity duration-300 ${step !== 2 && 'opacity-50'}`}>
+              <div className="p-6 sm:p-8">
+                {/* Branch selectors row */}
+                <div className="flex items-center gap-3 mb-5">
+                  <div className="bg-emerald-100 text-emerald-600 p-2 rounded-lg"><GitBranch size={20}/></div>
+                  <h2 className="text-xl font-bold">2. Map Commits</h2>
+                  {isRunning && commits.length > 0 && <Loader2 size={16} className="animate-spin text-slate-400 ml-auto" />}
                 </div>
-                <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 bg-white rounded-full p-2 border border-slate-200 shadow-sm z-10 hidden md:block">
-                  <ArrowRight className="text-slate-400" size={16} />
-                </div>
-                <div className="bg-slate-50 p-4 rounded-xl border border-slate-200">
-                  <label className="block text-[11px] font-bold text-slate-400 uppercase tracking-wider mb-1.5">Target Branch (Destination)</label>
-                  <select value={targetBranch} onChange={e => setTargetBranch(e.target.value)} className="input-clean font-medium shadow-sm bg-white text-sm">
-                    {branches.map(b => <option key={b} value={b}>{b}</option>)}
-                  </select>
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4 relative">
+                  <div className="bg-slate-50 p-4 rounded-xl border border-slate-200">
+                    <label className="block text-[11px] font-bold text-slate-400 uppercase tracking-wider mb-1.5">Base Branch (Source)</label>
+                    <select value={baseBranch} onChange={e => setBaseBranch(e.target.value)} className="input-clean font-medium shadow-sm bg-white text-sm">
+                      {branches.map(b => <option key={b} value={b}>{b}</option>)}
+                    </select>
+                  </div>
+                  <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 bg-white rounded-full p-2 border border-slate-200 shadow-sm z-10 hidden md:block">
+                    <ArrowRight className="text-slate-400" size={16} />
+                  </div>
+                  <div className="bg-slate-50 p-4 rounded-xl border border-slate-200">
+                    <label className="block text-[11px] font-bold text-slate-400 uppercase tracking-wider mb-1.5">Target Branch (Destination)</label>
+                    <select value={targetBranch} onChange={e => setTargetBranch(e.target.value)} className="input-clean font-medium shadow-sm bg-white text-sm">
+                      {branches.map(b => <option key={b} value={b}>{b}</option>)}
+                    </select>
+                  </div>
                 </div>
               </div>
             </div>
-          </div>
 
-          {/* Full-width git graph */}
-          <div className="px-4 sm:px-6">
-            {commits.length > 0 ? (
-              <GitGraphViewer
-                commits={commits}
-                selectedCommit={selectedCommit}
-                onSelectCommit={(hash) => step === 2 && setSelectedCommit(hash)}
-                baseBranch={baseBranch}
-                targetBranch={targetBranch}
-                projectPath={projectPath}
-                onSearch={setSearchQuery}
-                onToggleAll={setShowAllBranches}
-                showAll={showAllBranches}
-                isLoading={isRunning}
-                targetHashes={targetHashes}
-              />
-            ) : isRunning ? (
-              <div className="flex items-center justify-center h-48 gap-3 text-slate-400">
-                <Loader2 size={20} className="animate-spin" /> Loading commits...
-              </div>
-            ) : (
-              <div className="text-center text-slate-400 py-12">No commits found for this branch.</div>
-            )}
-          </div>
+            {/* Full-width git graph */}
+            <div className="-mx-4 sm:-mx-6 lg:-mx-8">
+              {commits.length > 0 ? (
+                <GitGraphViewer
+                  commits={commits}
+                  selectedCommit={selectedCommit}
+                  onSelectCommit={(hash) => step === 2 && setSelectedCommit(hash)}
+                  baseBranch={baseBranch}
+                  targetBranch={targetBranch}
+                  projectPath={projectPath}
+                  onSearch={setSearchQuery}
+                  isLoading={isRunning}
+                  targetHashes={targetHashes}
+                />
+              ) : isRunning ? (
+                <div className="flex items-center justify-center h-48 gap-3 text-slate-400">
+                  <Loader2 size={20} className="animate-spin" /> Loading commits...
+                </div>
+              ) : (
+                <div className="text-center text-slate-400 py-12">No commits found for this branch.</div>
+              )}
+            </div>
 
-          {step === 2 && (
-            <div className="px-6 max-w-4xl mx-auto mt-4">
+            {step === 2 && (
               <div className="flex justify-end">
                 <button onClick={branchAndReset} disabled={!selectedCommit} className="bg-slate-800 hover:bg-slate-700 disabled:bg-slate-300 text-white font-medium px-8 py-3 rounded-lg transition-colors flex items-center gap-2 shadow-sm">
                   Confirm Selection <ArrowRight size={18} />
                 </button>
               </div>
-            </div>
-          )}
-        </>
-      )}
-
-      {/* Steps 3-5 */}
-      <div className="px-6 max-w-4xl mx-auto space-y-8 pb-24">
+            )}
+          </>
+        )}
 
 
         {/* STEP 3: Playground / Local CI */}
@@ -456,7 +550,11 @@ export default function Home() {
                <div className="bg-orange-100 text-orange-600 p-2 rounded-lg shrink-0"><Terminal size={22}/></div>
                <div>
                  <h2 className="text-xl font-bold">3. Checkout & Playground</h2>
-                 <p className="text-slate-500 text-sm mt-1">Create branch and run CI validations locally.</p>
+                 <p className="text-slate-500 text-sm mt-1">
+                   {resumingRecordId 
+                     ? `Fix code locally on branch "${newBranchName}" and retry validation.` 
+                     : 'Create branch and run CI validations locally.'}
+                 </p>
                </div>
              </div>
 
@@ -468,7 +566,8 @@ export default function Home() {
                        className="input-clean font-mono flex-1 bg-white" placeholder="bun run test" />
                      {step === 3 && (
                        <button onClick={runOperation} disabled={isRunning} className="bg-orange-600 hover:bg-orange-500 disabled:bg-orange-300 text-white px-6 py-3 rounded-lg font-medium whitespace-nowrap flex items-center gap-2 justify-center shadow-sm">
-                         {isRunning ? <Loader2 className="animate-spin" /> : <Terminal size={18} />} Run Operate
+                         {isRunning ? <Loader2 className="animate-spin" /> : <Terminal size={18} />} 
+                         {resumingRecordId ? 'Retry Operate on Branch' : 'Run Operate'}
                        </button>
                      )}
                    </div>
@@ -477,21 +576,32 @@ export default function Home() {
 
              {operateLog && (
                <div className="border border-slate-200 rounded-xl overflow-hidden shadow-sm">
-                 <div className="bg-slate-800 text-slate-200 p-3 text-xs font-mono border-b border-slate-700 flex justify-between">
-                   <span>Console Output</span>
-                   <span className={operateLog.exitCode === 0 ? 'text-emerald-400' : 'text-red-400'}>
-                     Exit Code: {operateLog.exitCode}
-                   </span>
-                 </div>
-                 <div className="bg-slate-900 p-4 font-mono text-xs max-h-[300px] overflow-y-auto whitespace-pre-wrap">
-                   {operateLog.stdout && <span className="text-slate-300">{operateLog.stdout}</span>}
-                   {operateLog.stderr && <span className="text-red-400 mt-2 block">{operateLog.stderr}</span>}
-                   {!operateLog.stdout && !operateLog.stderr && <span className="text-slate-500 italic">No output</span>}
-                 </div>
+                  <div className="bg-slate-800 text-slate-200 p-3 text-xs font-mono border-b border-slate-700 flex justify-between items-center">
+                    <div className="flex items-center gap-3">
+                      <span>Console Output</span>
+                      <button 
+                        onClick={() => {
+                          const log = (operateLog.stdout || '') + (operateLog.stderr || '');
+                          navigator.clipboard.writeText(log);
+                        }}
+                        className="flex items-center gap-1 hover:text-white transition-colors text-[10px] bg-slate-700 px-2 py-0.5 rounded"
+                      >
+                        <Copy size={10} /> Copy Log
+                      </button>
+                    </div>
+                    <span className={operateLog.exitCode === 0 ? 'text-emerald-400' : 'text-red-400'}>
+                      Exit Code: {operateLog.exitCode}
+                    </span>
+                  </div>
+                  <div ref={terminalRef} className="bg-slate-900 p-4 font-mono text-xs max-h-[300px] overflow-y-auto whitespace-pre-wrap">
+                    {operateLog.stdout && <span className="text-slate-300">{operateLog.stdout}</span>}
+                    {operateLog.stderr && <span className="text-red-400 mt-2 block">{operateLog.stderr}</span>}
+                    {!operateLog.stdout && !operateLog.stderr && <span className="text-slate-500 italic">No output</span>}
+                  </div>
                </div>
              )}
 
-             {step === 3 && operateLog && operateLog.exitCode === 0 && (
+             {step === 3 && operateLog && operateLog.exitCode === 0 && !isRunning && (
                 <div className="mt-6 flex justify-end">
                   <button onClick={proceedToPR} className="bg-blue-600 hover:bg-blue-700 text-white font-medium px-8 py-3 rounded-lg transition-colors flex items-center gap-2 shadow-sm">
                     Checks Passed. Proceed to AI PR <ArrowRight size={18}/>
@@ -585,6 +695,8 @@ export default function Home() {
               </div>
           </section>
         )}
+          </div>
+        </main>
       </div>
     </div>
   );

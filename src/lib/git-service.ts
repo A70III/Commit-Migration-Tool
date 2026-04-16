@@ -177,15 +177,37 @@ export class GitService {
     });
   }
 
+  executeCommandStreaming(commandString: string) {
+    const parts = commandString.split(' ').filter(p => p.trim() !== '');
+    if (parts.length === 0) throw new Error("Empty command");
+
+    const command = parts[0];
+    const args = parts.slice(1);
+
+    return spawn(command, args, {
+      cwd: this.projectPath,
+      shell: true
+    });
+  }
+
   async migrateAndReset(baseBranch: string, targetCommitHash: string, newBranchName: string): Promise<void> {
     // 1. Checkout Base Branch
     await this.git.checkout(baseBranch);
+    
+    // 2. Refresh base branch to ensure up-to-date (optional, but good practice if remote tracking)
+    try {
+      await this.git.pull('origin', baseBranch);
+    } catch { /* ignore if no remote */ }
 
-    // 2. Create new branch from it and switch
+    // 3. Create and checkout new Branch
     await this.git.checkoutLocalBranch(newBranchName);
 
-    // 3. Reset hard to target commit
+    // 4. Hard reset to the Target Commit Hash
     await this.git.reset(['--hard', targetCommitHash]);
+  }
+
+  async checkoutBranch(branchName: string): Promise<void> {
+    await this.git.checkout(branchName);
   }
 
   async getDiffBetweenRoots(branch1: string, branch2: string): Promise<string> {

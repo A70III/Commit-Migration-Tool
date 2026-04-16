@@ -25,8 +25,6 @@ interface GitGraphViewerProps {
   targetBranch: string;
   projectPath: string;
   onSearch: (query: string) => void;
-  onToggleAll: (showAll: boolean) => void;
-  showAll: boolean;
   isLoading?: boolean;
   targetHashes?: Set<string>;
 }
@@ -52,7 +50,7 @@ function getColor(idx: number) {
 export default function GitGraphViewer({
   commits, selectedCommit, onSelectCommit,
   baseBranch, targetBranch, projectPath,
-  onSearch, onToggleAll, showAll, isLoading = false, targetHashes = new Set()
+  onSearch, isLoading = false, targetHashes = new Set()
 }: GitGraphViewerProps) {
   const [expandedCommit, setExpandedCommit] = useState<string | null>(null);
   const [commitFiles, setCommitFiles] = useState<Record<string, any[]>>({});
@@ -174,12 +172,7 @@ export default function GitGraphViewer({
             className="w-full pl-8 pr-3 py-1.5 text-xs bg-white border border-slate-200 rounded-md focus:outline-none focus:ring-1 focus:ring-blue-500 transition"
           />
         </div>
-        <label className="flex items-center gap-1.5 text-xs text-slate-600 cursor-pointer select-none">
-          <input type="checkbox" checked={showAll} onChange={e => onToggleAll(e.target.checked)}
-            className="w-3.5 h-3.5 rounded border-slate-300 text-blue-600 focus:ring-blue-500 cursor-pointer"
-          />
-          All Branches
-        </label>
+        {/* All Branches checkbox removed */}
         <div className="h-4 w-[1px] bg-slate-200" />
         <button onClick={() => onSearch(searchValue)} className="flex items-center gap-1 text-xs text-blue-600 hover:text-blue-700 font-semibold">
           <Filter size={13} /> Filter
