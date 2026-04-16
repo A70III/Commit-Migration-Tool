@@ -14,7 +14,16 @@ export default function Home() {
   // Config State
   const [projectPath, setProjectPath] = useLocalStorage('commitManager_projectPath', '');
   const [aiProvider, setAiProvider] = useLocalStorage('commitManager_aiProvider', 'gemini');
-  const [apiKey, setApiKey] = useLocalStorage('commitManager_apiKey', '');
+  const defaultModels: Record<string, string> = {
+    gemini: 'gemini-1.5-flash',
+    openai: 'gpt-4o',
+    deepseek: 'deepseek-chat',
+    openrouter: 'anthropic/claude-3.5-sonnet',
+    lmstudio: 'local-model'
+  };
+
+  const [apiKeys, setApiKeys] = useLocalStorage<Record<string, string>>('commitManager_apiKeys', {});
+  const [aiModels, setAiModels] = useLocalStorage<Record<string, string>>('commitManager_aiModels', {});
   const [githubToken, setGithubToken] = useLocalStorage('commitManager_githubToken', '');
   const [ciCommand, setCiCommand] = useLocalStorage('commitManager_ciCommand', 'bun run test');
   
@@ -189,10 +198,12 @@ export default function Home() {
     setOperateLog({ stdout: '', stderr: '', exitCode: null });
     
     // Determine if we are resuming or starting fresh
+    // Only treat as resuming if the branch was actually successfully created previously
+    const isResuming = !!resumingRecordId && newBranchName !== 'Preparing...';
     const historyId = resumingRecordId || Date.now().toString();
-    const isResuming = !!resumingRecordId;
     
-    if (isResuming) {
+    if (!!resumingRecordId) {
+      // If we clicked a history record but it failed before branching, we just update it
       setMigrationHistory(prev => prev.map(r => r.id === historyId ? { 
         ...r, status: 'running', log: '', command: ciCommand 
       } : r));
@@ -274,9 +285,10 @@ export default function Home() {
   };
 
   const proceedToPR = () => {
-    if (!apiKey) {
+    const currentKey = apiKeys[aiProvider] || '';
+    if (!currentKey && aiProvider !== 'lmstudio') {
       setShowSettings(true);
-      setError('An API Key is required to generate the Pull Request content.');
+      setError(`An API Key for ${aiProvider} is required to generate the Pull Request content.`);
       return;
     }
     setStep(4);
@@ -294,7 +306,8 @@ export default function Home() {
           targetBranch, 
           newBranch: newBranchName,
           provider: aiProvider,
-          apiKey
+          apiKey: apiKeys[aiProvider] || '',
+          customModel: aiModels[aiProvider] || defaultModels[aiProvider] || ''
         }),
       });
       const data = await res.json();
@@ -420,8 +433,26 @@ export default function Home() {
                   </select>
                 </div>
                 <div>
-                  <label className="block text-sm font-semibold text-slate-700 mb-1">AI Provider API Key</label>
-                  <input type="password" value={apiKey} onChange={e => setApiKey(e.target.value)} className="input-clean font-mono text-sm" placeholder="sk-..." />
+                  <label className="block text-sm font-semibold text-slate-700 mb-1">{aiProvider.charAt(0).toUpperCase() + aiProvider.slice(1)} API Key</label>
+                  <input 
+                    type="password" 
+                    value={apiKeys[aiProvider] || ''} 
+                    onChange={e => setApiKeys(prev => ({ ...prev, [aiProvider]: e.target.value }))} 
+                    className="input-clean font-mono text-sm" 
+                    placeholder={aiProvider === 'lmstudio' ? 'Not required for local model' : 'sk-...'} 
+                    disabled={aiProvider === 'lmstudio'}
+                  />
+                </div>
+                <div>
+                  <label className="block text-sm font-semibold text-slate-700 mb-1">AI Model Name</label>
+                  <input 
+                    type="text" 
+                    value={aiModels[aiProvider] !== undefined ? aiModels[aiProvider] : defaultModels[aiProvider]} 
+                    onChange={e => setAiModels(prev => ({ ...prev, [aiProvider]: e.target.value }))} 
+                    className="input-clean font-mono text-sm" 
+                    placeholder={`e.g. ${defaultModels[aiProvider]}`} 
+                  />
+                  <p className="text-[10px] text-slate-400 mt-1">Default: {defaultModels[aiProvider]}</p>
                 </div>
                 <div className="pt-2">
                   <label className="block text-sm font-semibold text-slate-700 mb-1">GitHub Personal Access Token</label>

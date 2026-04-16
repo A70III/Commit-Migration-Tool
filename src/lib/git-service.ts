@@ -191,23 +191,19 @@ export class GitService {
   }
 
   async migrateAndReset(baseBranch: string, targetCommitHash: string, newBranchName: string): Promise<void> {
-    // 1. Checkout Base Branch
-    await this.git.checkout(baseBranch);
+    // 1. Force Checkout Base Branch (discard local changes)
+    await this.git.checkout(baseBranch, ['-f']);
     
-    // 2. Refresh base branch to ensure up-to-date (optional, but good practice if remote tracking)
-    try {
-      await this.git.pull('origin', baseBranch);
-    } catch { /* ignore if no remote */ }
-
-    // 3. Create and checkout new Branch
+    // 2. Create and checkout new Branch
     await this.git.checkoutLocalBranch(newBranchName);
 
-    // 4. Hard reset to the Target Commit Hash
+    // 3. Hard reset to the Target Commit Hash
     await this.git.reset(['--hard', targetCommitHash]);
   }
 
   async checkoutBranch(branchName: string): Promise<void> {
-    await this.git.checkout(branchName);
+    // Force checkout to discard any local changes
+    await this.git.checkout(branchName, ['-f']);
   }
 
   async getDiffBetweenRoots(branch1: string, branch2: string): Promise<string> {

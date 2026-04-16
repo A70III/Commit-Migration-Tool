@@ -7,6 +7,7 @@ export interface GeneratePRParams {
   apiKey: string;
   diffContent: string;
   template?: string; // Optional custom template
+  customModel?: string; // Optional custom model selection
 }
 
 const defaultTemplate = `
@@ -46,7 +47,7 @@ export async function generatePRContent(params: GeneratePRParams): Promise<strin
   try {
     if (provider === 'gemini') {
       const genAI = new GoogleGenerativeAI(apiKey);
-      const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" }); // or pro
+      const model = genAI.getGenerativeModel({ model: params.customModel || "gemini-1.5-flash" }); // or pro
       const result = await model.generateContent(prompt);
       return result.response.text();
     } 
@@ -74,6 +75,10 @@ export async function generatePRContent(params: GeneratePRParams): Promise<strin
         break;
       default:
         throw new Error("Unsupported provider");
+    }
+
+    if (params.customModel && params.customModel.trim() !== '') {
+       modelName = params.customModel.trim();
     }
 
     const headers: Record<string, string> = {

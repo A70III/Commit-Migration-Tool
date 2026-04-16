@@ -10,7 +10,8 @@ export async function POST(req: NextRequest) {
       newBranch, 
       provider, 
       apiKey, 
-      template 
+      template,
+      customModel
     } = await req.json();
 
     if (!projectPath || !targetBranch || !newBranch || !provider || !apiKey) {
@@ -42,7 +43,8 @@ export async function POST(req: NextRequest) {
       provider,
       apiKey,
       diffContent: diffContent.substring(0, 30000), // Cap diff to ~30k chars
-      template
+      template,
+      customModel
     });
     
     return NextResponse.json({ content: result, diffContent });
