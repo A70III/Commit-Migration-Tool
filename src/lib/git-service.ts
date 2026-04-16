@@ -123,6 +123,19 @@ export class GitService {
     }
   }
 
+  async getBranchHashes(branch: string): Promise<Set<string>> {
+    if (!branch) return new Set();
+    try {
+      const result = spawnSync('git', ['-C', this.projectPath, 'rev-list', branch], { encoding: 'utf-8', maxBuffer: 1024 * 1024 * 10 });
+      if (result.error) throw result.error;
+      const lines = result.stdout.split('\n').filter(l => l.length === 40);
+      return new Set(lines);
+    } catch (e) {
+      console.error(`Failed to get branch hashes for ${branch}`, e);
+      return new Set();
+    }
+  }
+
   async spawnCommand(commandString: string): Promise<{ stdout: string; stderr: string; exitCode: number }> {
     // Basic splitting strategy, more complex might be needed for quoted args
     const parts = commandString.split(' ').filter(p => p.trim() !== '');

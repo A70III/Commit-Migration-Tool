@@ -35,6 +35,7 @@ export default function Home() {
   const [commits, setCommits] = useState<any[]>([]);
   const [selectedCommit, setSelectedCommit] = useState('');
   const [newBranchName, setNewBranchName] = useState('');
+  const [targetHashes, setTargetHashes] = useState<Set<string>>(new Set());
 
   const [searchQuery, setSearchQuery] = useState('');
   const [showAllBranches, setShowAllBranches] = useState(false);
@@ -104,13 +105,13 @@ export default function Home() {
   };
 
   // Always keep a ref to latest params to avoid stale closures in loadCommits
-  const latestParams = useRef({ projectPath, baseBranch, searchQuery, showAllBranches });
+  const latestParams = useRef({ projectPath, baseBranch, targetBranch, searchQuery, showAllBranches });
   useEffect(() => {
-    latestParams.current = { projectPath, baseBranch, searchQuery, showAllBranches };
+    latestParams.current = { projectPath, baseBranch, targetBranch, searchQuery, showAllBranches };
   });
 
   const loadCommits = useCallback(async () => {
-    const { projectPath, baseBranch, searchQuery, showAllBranches } = latestParams.current;
+    const { projectPath, baseBranch, targetBranch, searchQuery, showAllBranches } = latestParams.current;
     if (!projectPath || !baseBranch) return;
     setIsRunning(true);
     setError('');
@@ -122,6 +123,7 @@ export default function Home() {
         body: JSON.stringify({ 
           projectPath, 
           branch: baseBranch,
+          compareBranch: targetBranch,
           search: searchQuery || undefined,
           showAll: showAllBranches
         }),
@@ -130,6 +132,7 @@ export default function Home() {
       if (!res.ok) throw new Error(data.error);
       
       setCommits(data.logs || []);
+      setTargetHashes(new Set(data.sharedHashes || []));
     } catch (err: any) {
       setError(err.message);
     } finally {
@@ -260,10 +263,10 @@ export default function Home() {
   };
 
   useEffect(() => {
-    if (step === 2 && baseBranch) {
+    if (step === 2 && baseBranch && targetBranch) {
       loadCommits();
     }
-  }, [step, baseBranch, searchQuery, showAllBranches]);
+  }, [step, baseBranch, targetBranch, searchQuery, showAllBranches]);
 
   // --- Render --- //
   if (!mounted) {
@@ -419,6 +422,7 @@ export default function Home() {
                 onToggleAll={setShowAllBranches}
                 showAll={showAllBranches}
                 isLoading={isRunning}
+                targetHashes={targetHashes}
               />
             ) : isRunning ? (
               <div className="flex items-center justify-center h-48 gap-3 text-slate-400">

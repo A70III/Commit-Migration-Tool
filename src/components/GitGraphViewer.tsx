@@ -28,6 +28,7 @@ interface GitGraphViewerProps {
   onToggleAll: (showAll: boolean) => void;
   showAll: boolean;
   isLoading?: boolean;
+  targetHashes?: Set<string>;
 }
 
 interface LaneItem {
@@ -51,7 +52,7 @@ function getColor(idx: number) {
 export default function GitGraphViewer({
   commits, selectedCommit, onSelectCommit,
   baseBranch, targetBranch, projectPath,
-  onSearch, onToggleAll, showAll, isLoading = false,
+  onSearch, onToggleAll, showAll, isLoading = false, targetHashes = new Set()
 }: GitGraphViewerProps) {
   const [expandedCommit, setExpandedCommit] = useState<string | null>(null);
   const [commitFiles, setCommitFiles] = useState<Record<string, any[]>>({});
@@ -263,6 +264,11 @@ export default function GitGraphViewer({
                     ${isSelected ? 'text-blue-500' : 'text-slate-300 group-hover:text-slate-400'}`}>
                     {isExpanded ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
                   </span>
+                  {targetHashes.has(c.hash) && (
+                    <span className="flex items-center justify-center w-4 h-4 rounded-full bg-emerald-100 text-emerald-600 shrink-0" title={`Already in ${targetBranch}`}>
+                      <CheckCircle2 size={12} />
+                    </span>
+                  )}
                   <span className="font-mono text-[11px] text-blue-500 shrink-0">{c.hash.substring(0, 7)}</span>
                   <span className="text-xs text-slate-700 truncate font-medium">{c.message}</span>
                   <span className="flex items-center shrink-0">{renderRefs(c.refs)}</span>
