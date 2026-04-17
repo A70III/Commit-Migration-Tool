@@ -21,6 +21,7 @@ import {
   Moon,
   Sun,
   GitMerge,
+  RefreshCw,
 } from "lucide-react";
 import GitGraphViewer from "@/components/GitGraphViewer";
 import MigrationSidebar from "@/components/MigrationSidebar";
@@ -695,7 +696,24 @@ export default function Home() {
                 <Moon size={18} />
               </span>
             </button>
-
+            <button
+              onClick={() => window.location.reload()}
+              className="flex items-center gap-2 px-4 py-2 text-sm font-medium rounded-lg transition-colors"
+              style={{ color: "var(--secondary-text)" }}
+              onMouseEnter={(e) => {
+                (e.currentTarget as HTMLButtonElement).style.background =
+                  "var(--muted)";
+                (e.currentTarget as HTMLButtonElement).style.color =
+                  "var(--foreground)";
+              }}
+              onMouseLeave={(e) => {
+                (e.currentTarget as HTMLButtonElement).style.background = "";
+                (e.currentTarget as HTMLButtonElement).style.color =
+                  "var(--secondary-text)";
+              }}
+            >
+              <RefreshCw size={18} /> Refresh
+            </button>
             <button
               onClick={() => setShowSettings(true)}
               className="flex items-center gap-2 px-4 py-2 text-sm font-medium rounded-lg transition-colors"
