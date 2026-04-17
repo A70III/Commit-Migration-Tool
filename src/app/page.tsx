@@ -662,7 +662,7 @@ export default function Home() {
               className="text-xl font-bold tracking-tight"
               style={{ color: "var(--card-foreground)" }}
             >
-              Workspace Migration
+              Commit Migration Tool
             </h1>
           </div>
 
