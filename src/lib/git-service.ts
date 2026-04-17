@@ -217,4 +217,66 @@ export class GitService {
         throw e;
     }
   }
+
+  /**
+   * จำลองการ Merge migration branch เข้า target branch
+   * แล้วรัน operateCommand บนสถานะ merged นั้น
+   * Stream ผลลัพธ์ผ่าน callback เพื่อส่ง NDJSON ไปยัง client
+   */
+  async simulateMergeAndRun(
+    migrationBranch: string,
+    targetBranch: string,
+    operateCommand: string,
+    onEvent: (event: Record<string, unknown>) => void
+  ): Promise<void> {
+    const simBranch = `verify/sim-${Date.now()}`;
+
+    // Step 1: บันทึก branch ปัจจุบัน
+    const currentBranch = (await this.git.branch()).current;
+
+    try {
+      // Step 2-3: Checkout target (force clean) แล้วสร้าง sandbox branch
+      await this.git.checkout(['-f', targetBranch]);
+      await this.git.checkoutLocalBranch(simBranch);
+      onEvent({ type: 'sim_info', simBranch, message: `Sandbox created: ${simBranch}` });
+
+      // Step 4: ลอง Merge migration branch เข้า sandbox
+      try {
+        await this.git.merge([migrationBranch, '--no-ff']);
+        onEvent({ type: 'sim_merge_ok', message: 'Merge simulation successful — no conflicts.' });
+      } catch (mergeError: unknown) {
+        // เกิด Conflict: Abort แล้ว report
+        try { await this.git.merge(['--abort']); } catch { /* merge ยังไม่เริ่ม, ignore */ }
+        const msg = mergeError instanceof Error ? mergeError.message : 'Merge conflict detected';
+        onEvent({ type: 'sim_conflict', message: msg });
+        return; // หยุดทันที ไม่รัน command
+      }
+
+      // Step 5: รัน operate command บน merged state
+      if (!operateCommand) {
+        onEvent({ type: 'exit', code: 0, message: 'No command specified — merge simulation passed.' });
+        return;
+      }
+
+      await new Promise<void>((resolve) => {
+        const proc = this.executeCommandStreaming(operateCommand);
+        proc.stdout?.on('data', (d: Buffer) => onEvent({ type: 'stdout', data: d.toString() }));
+        proc.stderr?.on('data', (d: Buffer) => onEvent({ type: 'stderr', data: d.toString() }));
+        proc.on('close', (code: number | null) => {
+          onEvent({ type: 'exit', code: code ?? 1 });
+          resolve();
+        });
+        proc.on('error', (err: Error) => {
+          onEvent({ type: 'error', message: err.message });
+          resolve();
+        });
+      });
+
+    } finally {
+      // Step 6: Cleanup — checkout กลับและลบ sandbox branch เสมอ
+      try { await this.git.checkout(['-f', currentBranch]); } catch { /* best-effort */ }
+      try { await this.git.deleteLocalBranch(simBranch, true); } catch { /* best-effort */ }
+      onEvent({ type: 'sim_cleanup', message: `Sandbox ${simBranch} removed.` });
+    }
+  }
 }

@@ -4,9 +4,9 @@ import { useState, useEffect, useCallback, useRef } from 'react';
 import { useLocalStorage } from '@/lib/use-local-storage';
 import { useTheme } from '@/lib/use-theme';
 import { 
-  FolderGit2, Settings, GitBranch, ArrowRight, 
+  FolderGit2, Settings, GitBranch, ArrowRight,
   Terminal, Sparkles, Send, CheckCircle2, AlertCircle,
-  Loader2, ExternalLink, X, FolderSearch, Copy, Moon, Sun
+  Loader2, ExternalLink, X, FolderSearch, Copy, Moon, Sun, GitMerge
 } from 'lucide-react';
 import GitGraphViewer from '@/components/GitGraphViewer';
 import MigrationSidebar from '@/components/MigrationSidebar';
@@ -54,6 +54,16 @@ export default function Home() {
   // Operation State
   const [operateLog, setOperateLog] = useState<{stdout: string, stderr: string, exitCode: number | null} | null>(null);
   const [resumingRecordId, setResumingRecordId] = useState<string | null>(null);
+
+  // Simulation State
+  const [simLog, setSimLog] = useState<{
+    stdout: string;
+    stderr: string;
+    exitCode: number | null;
+    status: 'idle' | 'running' | 'merge_ok' | 'conflict' | 'done';
+    conflictMessage?: string;
+  } | null>(null);
+  const [isSimRunning, setIsSimRunning] = useState(false);
 
   // PR State
   const [prContent, setPrContent] = useState('');
@@ -198,6 +208,8 @@ export default function Home() {
     setIsRunning(true);
     setError('');
     setOperateLog({ stdout: '', stderr: '', exitCode: null });
+    // Reset simulation — operate code changed, previous sim result is no longer valid
+    setSimLog(null);
     
     // Determine if we are resuming or starting fresh
     // Only treat as resuming if the branch was actually successfully created previously
@@ -294,7 +306,70 @@ export default function Home() {
       return;
     }
     setStep(4);
-  }
+  };
+
+  const runSimulation = async () => {
+    if (!newBranchName || newBranchName === 'Preparing...') return;
+
+    setIsSimRunning(true);
+    setSimLog({ stdout: '', stderr: '', exitCode: null, status: 'running' });
+
+    try {
+      const res = await fetch('/api/git/simulate-merge', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          projectPath,
+          migrationBranch: newBranchName,
+          targetBranch,
+          commandString: ciCommand,
+        }),
+      });
+
+      if (!res.ok || !res.body) throw new Error('Failed to start simulation');
+
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split('\n');
+        buffer = lines.pop() || '';
+
+        for (const line of lines) {
+          if (!line.trim()) continue;
+          const chunk = JSON.parse(line);
+
+          if (chunk.type === 'sim_merge_ok') {
+            setSimLog(prev => prev ? { ...prev, status: 'merge_ok' } : null);
+          } else if (chunk.type === 'sim_conflict') {
+            setSimLog(prev => prev
+              ? { ...prev, status: 'conflict', conflictMessage: chunk.message as string }
+              : null
+            );
+          } else if (chunk.type === 'stdout') {
+            setSimLog(prev => prev ? { ...prev, stdout: prev.stdout + (chunk.data as string) } : null);
+          } else if (chunk.type === 'stderr') {
+            setSimLog(prev => prev ? { ...prev, stderr: prev.stderr + (chunk.data as string) } : null);
+          } else if (chunk.type === 'exit') {
+            setSimLog(prev => prev ? { ...prev, exitCode: chunk.code as number, status: 'done' } : null);
+          } else if (chunk.type === 'error') {
+            throw new Error(chunk.message as string);
+          }
+        }
+      }
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : 'Simulation error';
+      setError(msg);
+      setSimLog(prev => prev ? { ...prev, status: 'done', exitCode: 1 } : null);
+    } finally {
+      setIsSimRunning(false);
+    }
+  };
 
   const generatePR = async () => {
     setIsRunning(true);
@@ -664,12 +739,138 @@ export default function Home() {
                </div>
              )}
 
-             {step === 3 && operateLog && operateLog.exitCode === 0 && !isRunning && (
-                <div className="mt-6 flex justify-end">
-                  <button onClick={proceedToPR} className="bg-blue-600 hover:bg-blue-700 text-white font-medium px-8 py-3 rounded-lg transition-colors flex items-center gap-2 shadow-sm">
-                    Checks Passed. Proceed to AI PR <ArrowRight size={18}/>
-                  </button>
-                </div>
+             {/* === Simulation Panel (แสดงหลังจาก Local CI ผ่าน) === */}
+             {step === 3 && operateLog?.exitCode === 0 && !isRunning && (
+               <div className="mt-6 space-y-4 animate-slide-up">
+
+                 {/* Trigger Card — แสดงเมื่อยังไม่ได้รัน simulation */}
+                 {!simLog && (
+                   <div className="p-5 rounded-xl border-2 border-dashed"
+                     style={{ borderColor: 'var(--border)', background: 'var(--muted)' }}>
+                     <div className="flex items-start gap-4">
+                       <div className="bg-green-100 text-green-600 p-2 rounded-lg shrink-0">
+                         <CheckCircle2 size={22} />
+                       </div>
+                       <div className="flex-1">
+                         <h3 className="font-bold" style={{ color: 'var(--card-foreground)' }}>
+                           Local CI Passed
+                         </h3>
+                         <p className="text-sm mt-1" style={{ color: 'var(--secondary-text)' }}>
+                           Run a <strong>Merge Simulation</strong> to verify code also passes
+                           after merging into{' '}
+                           <code className="font-mono px-1 py-0.5 rounded text-xs" style={{ background: 'var(--muted-foreground)', color: 'var(--card)' }}>
+                             {targetBranch}
+                           </code>.
+                         </p>
+                       </div>
+                       <button
+                         id="run-simulation-btn"
+                         onClick={runSimulation}
+                         disabled={isSimRunning}
+                         className="shrink-0 bg-teal-600 hover:bg-teal-500 disabled:bg-teal-300
+                                    text-white px-5 py-2.5 rounded-lg font-medium text-sm
+                                    flex items-center gap-2 shadow-sm transition-colors whitespace-nowrap"
+                       >
+                         <GitMerge size={16} />
+                         Run Simulation
+                       </button>
+                     </div>
+                   </div>
+                 )}
+
+                 {/* Simulation Console */}
+                 {simLog && (
+                   <div className="rounded-xl overflow-hidden shadow-sm"
+                     style={{ border: '1px solid var(--border)' }}>
+
+                     {/* Terminal Header */}
+                     <div className="bg-slate-900 text-slate-200 p-3 text-xs font-mono
+                                     border-b border-slate-700 flex justify-between items-center">
+                       <span className="flex items-center gap-2">
+                         <GitMerge size={12} />
+                         Merge Simulation — {newBranchName} → {targetBranch}
+                         {(simLog.status === 'running' || isSimRunning) && (
+                           <Loader2 size={12} className="animate-spin text-teal-400" />
+                         )}
+                         {simLog.status === 'merge_ok' && (
+                           <span className="text-teal-400">✓ Merged OK</span>
+                         )}
+                       </span>
+                       <span className={
+                         simLog.status === 'conflict' ? 'text-red-400' :
+                         simLog.exitCode === 0 ? 'text-emerald-400' :
+                         simLog.exitCode !== null ? 'text-red-400' : 'text-slate-400'
+                       }>
+                         {simLog.status === 'conflict'
+                           ? '⚠ Conflict'
+                           : simLog.exitCode !== null
+                             ? `Exit: ${simLog.exitCode}`
+                             : 'Running...'}
+                       </span>
+                     </div>
+
+                     {/* Conflict Banner */}
+                     {simLog.status === 'conflict' && (
+                       <div className="bg-red-950 border-b border-red-800 p-4 font-mono text-sm text-red-300">
+                         <p>⚠ {simLog.conflictMessage}</p>
+                         <p className="text-red-400 mt-2 text-xs">
+                           Fix conflicts on your migration branch, re-run Local CI, then retry simulation.
+                         </p>
+                         <button onClick={() => setSimLog(null)}
+                           className="mt-3 text-xs border border-red-700 text-red-400 px-3 py-1 rounded hover:bg-red-900 transition-colors">
+                           Reset Simulation
+                         </button>
+                       </div>
+                     )}
+
+                     {/* Output */}
+                     <div className="bg-slate-950 p-4 font-mono text-xs max-h-[280px] overflow-y-auto whitespace-pre-wrap">
+                       {simLog.stdout && <span className="text-slate-300">{simLog.stdout}</span>}
+                       {simLog.stderr && <span className="text-red-400 mt-2 block">{simLog.stderr}</span>}
+                       {!simLog.stdout && !simLog.stderr && (
+                         <span className="text-slate-600 italic">Waiting for output...</span>
+                       )}
+                     </div>
+                   </div>
+                 )}
+
+                 {/* Success → Proceed to PR */}
+                 {simLog?.status === 'done' && simLog.exitCode === 0 && (
+                   <div className="flex items-center justify-between p-4 rounded-xl"
+                     style={{ background: 'rgba(16,185,129,0.1)', border: '1px solid rgba(16,185,129,0.3)' }}>
+                     <div className="flex items-center gap-3 text-emerald-500">
+                       <CheckCircle2 size={20} />
+                       <span className="font-semibold text-sm">
+                         Post-merge simulation passed — safe to create PR!
+                       </span>
+                     </div>
+                     <button onClick={proceedToPR}
+                       className="bg-blue-600 hover:bg-blue-700 text-white font-medium px-6 py-2.5
+                                  rounded-lg transition-colors flex items-center gap-2 shadow-sm text-sm">
+                       Proceed to AI PR <ArrowRight size={16} />
+                     </button>
+                   </div>
+                 )}
+
+                 {/* Failure → Reset */}
+                 {simLog?.status === 'done' && simLog.exitCode !== null && simLog.exitCode !== 0 && (
+                   <div className="flex items-center justify-between p-4 rounded-xl"
+                     style={{ background: 'rgba(239,68,68,0.08)', border: '1px solid rgba(239,68,68,0.3)' }}>
+                     <div className="flex items-center gap-3 text-red-400">
+                       <AlertCircle size={20} />
+                       <span className="font-semibold text-sm">
+                         Simulation failed (exit {simLog.exitCode}). Fix the issue and re-run.
+                       </span>
+                     </div>
+                     <button onClick={() => setSimLog(null)}
+                       className="border text-sm px-4 py-2 rounded-lg transition-colors"
+                       style={{ borderColor: 'var(--border)', color: 'var(--secondary-text)' }}>
+                       Reset Simulation
+                     </button>
+                   </div>
+                 )}
+
+               </div>
              )}
           </section>
         )}
