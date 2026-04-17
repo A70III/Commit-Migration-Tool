@@ -64,6 +64,7 @@ export default function Home() {
     conflictMessage?: string;
   } | null>(null);
   const [isSimRunning, setIsSimRunning] = useState(false);
+  const [isAbsorbing, setIsAbsorbing] = useState(false);
 
   // PR State
   const [prContent, setPrContent] = useState('');
@@ -371,7 +372,46 @@ export default function Home() {
     }
   };
 
+  // Auto-resolve conflict: merge target INTO migration, migration always wins (-X ours)
+  const runAbsorb = async () => {
+    setIsAbsorbing(true);
+    try {
+      const res = await fetch('/api/git/absorb-target', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ projectPath, migrationBranch: newBranchName, targetBranch }),
+      });
+      if (!res.ok || !res.body) throw new Error('Failed to start absorb');
+
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split('\n');
+        buffer = lines.pop() || '';
+        for (const line of lines) {
+          if (!line.trim()) continue;
+          const chunk = JSON.parse(line);
+          if (chunk.type === 'absorb_error') throw new Error(chunk.message as string);
+        }
+      }
+
+      // Absorb สำเร็จ → reset simulation แล้วรัน simulation ใหม่ทันที
+      setSimLog(null);
+      await runSimulation();
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : 'Auto-resolve failed';
+      setError(msg);
+    } finally {
+      setIsAbsorbing(false);
+    }
+  };
+
   const generatePR = async () => {
+
     setIsRunning(true);
     setError('');
     try {
@@ -811,15 +851,46 @@ export default function Home() {
 
                      {/* Conflict Banner */}
                      {simLog.status === 'conflict' && (
-                       <div className="bg-red-950 border-b border-red-800 p-4 font-mono text-sm text-red-300">
-                         <p>⚠ {simLog.conflictMessage}</p>
-                         <p className="text-red-400 mt-2 text-xs">
-                           Fix conflicts on your migration branch, re-run Local CI, then retry simulation.
-                         </p>
-                         <button onClick={() => setSimLog(null)}
-                           className="mt-3 text-xs border border-red-700 text-red-400 px-3 py-1 rounded hover:bg-red-900 transition-colors">
-                           Reset Simulation
-                         </button>
+                       <div className="border-b" style={{ borderColor: 'rgba(239,68,68,0.3)', background: 'rgba(239,68,68,0.06)' }}>
+                         <div className="p-4 space-y-3">
+                           <div className="flex items-start gap-2">
+                             <AlertCircle size={16} className="text-red-400 mt-0.5 shrink-0" />
+                             <div>
+                               <p className="text-sm font-semibold text-red-400">Merge Conflict Detected</p>
+                               <p className="text-xs mt-1 font-mono" style={{ color: 'var(--secondary-text)' }}>
+                                 {simLog.conflictMessage}
+                               </p>
+                             </div>
+                           </div>
+
+                           <div className="rounded-lg p-3 text-xs space-y-1" style={{ background: 'rgba(0,0,0,0.2)', color: 'var(--secondary-text)' }}>
+                             <p className="font-semibold text-amber-400">How Auto-resolve works:</p>
+                             <p>Migration branch code will <strong className="text-white">always win</strong> every conflict.</p>
+                             <p className="font-mono opacity-70">git merge -X ours {targetBranch} → auto-commit → retry simulation</p>
+                           </div>
+
+                           <div className="flex gap-2">
+                             <button
+                               id="auto-resolve-btn"
+                               onClick={runAbsorb}
+                               disabled={isAbsorbing}
+                               className="flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-semibold transition-colors
+                                          bg-amber-500 hover:bg-amber-400 disabled:bg-amber-800 text-black disabled:text-amber-400"
+                             >
+                               {isAbsorbing
+                                 ? <><Loader2 size={14} className="animate-spin" /> Resolving...</>
+                                 : <><GitMerge size={14} /> Auto-resolve (Migration Wins)</>}
+                             </button>
+                             <button
+                               onClick={() => setSimLog(null)}
+                               disabled={isAbsorbing}
+                               className="px-3 py-2 rounded-lg text-xs border transition-colors disabled:opacity-40"
+                               style={{ borderColor: 'var(--border)', color: 'var(--secondary-text)' }}
+                             >
+                               Reset
+                             </button>
+                           </div>
+                         </div>
                        </div>
                      )}
 

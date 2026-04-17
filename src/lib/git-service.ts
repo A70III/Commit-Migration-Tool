@@ -279,4 +279,37 @@ export class GitService {
       onEvent({ type: 'sim_cleanup', message: `Sandbox ${simBranch} removed.` });
     }
   }
+
+  /**
+   * Merge targetBranch INTO migrationBranch โดยใช้ strategy -X ours
+   * กล่าวคือ ทุก conflict migration branch จะชนะ (migration code wins always)
+   * หลังจากนี้ PR บน GitHub จะ merge ได้โดยไม่ติด conflict
+   */
+  async absorbTargetForceMigration(
+    migrationBranch: string,
+    targetBranch: string,
+    onEvent: (event: Record<string, unknown>) => void
+  ): Promise<void> {
+    // Checkout migration branch (ที่เราต้องการให้ชนะ)
+    await this.git.checkout(['-f', migrationBranch]);
+    onEvent({ type: 'absorb_info', message: `Checked out ${migrationBranch}` });
+
+    try {
+      // Merge target INTO migration โดย migration wins ทุก conflict (-X ours)
+      await this.git.merge([targetBranch, '--no-ff', '-X', 'ours',
+        '-m', `chore: absorb ${targetBranch} changes (migration wins conflicts)`
+      ]);
+      onEvent({
+        type: 'absorb_done',
+        message: `Successfully merged ${targetBranch} into ${migrationBranch} — migration code wins all conflicts.`
+      });
+    } catch (mergeError: unknown) {
+      // -X ours ควร handle ทุก conflict อัตโนมัติ
+      // ถ้ายัง error แสดงว่ามีปัญหาอื่น (เช่น untracked files)
+      try { await this.git.merge(['--abort']); } catch { /* ignore */ }
+      const msg = mergeError instanceof Error ? mergeError.message : 'Absorb merge failed';
+      onEvent({ type: 'absorb_error', message: msg });
+    }
+  }
 }
+
